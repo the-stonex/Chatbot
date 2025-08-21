@@ -1,10 +1,10 @@
 {
-    "name": "chatbot",    
+    "name": "chatbot",
     "env": {
         "BOT_TOKEN": {
             "description": "telegram bot token here",
             "required": true
-        },        
+        },
         "MONGO_URL": {
             "description": "mongo db url here",
             "required": true
@@ -33,12 +33,10 @@
             "description":"fill stickers id here",
             "required":true
         },
-        
         "START_IMG": {
             "description": "Start Image For Bot.",
             "required": false
         },
-        
         "API_ID": {
             "description": "telegram api id here",
             "required": true
@@ -47,10 +45,5 @@
             "description": "telegram api hash here",
             "required": true
         }
-    },
-    "addons": [
-        {
-            "plan": "heroku-postgresql"
-        }
-    ]
+    }
 }

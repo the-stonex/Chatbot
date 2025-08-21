@@ -4,9 +4,7 @@ from pyrogram.enums import ChatAction, ChatMembersFilter
 from pymongo import MongoClient
 import os
 import random
-import time
 import asyncio
-from datetime import datetime
 
 # ------------------- ENV -------------------
 API_ID = os.environ.get("API_ID")
@@ -21,6 +19,9 @@ BOT_NAME = os.environ.get("BOT_NAME", "CHATBOT")
 START_IMG = os.environ.get("START_IMG", "")
 STKR = os.environ.get("STKR", "")
 
+if not all([API_ID, API_HASH, BOT_TOKEN, MONGO_URL]):
+    raise ValueError("Please set all required environment variables!")
+
 # ------------------- CLIENT -------------------
 bot = Client("chat-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -28,6 +29,10 @@ bot = Client("chat-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 mongo = MongoClient(MONGO_URL)
 vickdb = mongo["VickDb"]["Vick"]
 chatai = mongo["Word"]["WordDb"]
+
+# Create indexes for better performance
+chatai.create_index("word")
+vickdb.create_index("chat_id")
 
 # ------------------- BUTTONS -------------------
 MAIN_BTN = InlineKeyboardMarkup([
@@ -49,7 +54,8 @@ SOURCE_BTN = InlineKeyboardMarkup([
 
 # ------------------- HELPER FUNCTIONS -------------------
 async def is_admins(chat_id: int):
-    return [m.user.id async for m in bot.get_chat_members(chat_id, filter=ChatMembersFilter.ADMINISTRATORS)]
+    """Return set of admin user IDs."""
+    return {m.user.id async for m in bot.get_chat_members(chat_id, filter=ChatMembersFilter.ADMINISTRATORS)}
 
 # ------------------- START -------------------
 @bot.on_message(filters.command(["start", f"start@{BOT_USERNAME}"]))
@@ -57,12 +63,23 @@ async def start_handler(_, message: Message):
     g = random.choice(["❤️","🎉","✨","🪸","🎉","🎈","🎯"])
     await message.reply_text(g)
     await asyncio.sleep(1)
-    await message.reply_sticker(STKR)
-    await message.reply_photo(photo=START_IMG, caption=f"**Hey, I am {BOT_NAME}**", reply_markup=MAIN_BTN)
+    if STKR:
+        try:
+            await message.reply_sticker(STKR)
+        except:
+            pass
+    if START_IMG:
+        try:
+            await message.reply_photo(photo=START_IMG, caption=f"**Hey, I am {BOT_NAME}**", reply_markup=MAIN_BTN)
+        except:
+            await message.reply_text(f"**Hey, I am {BOT_NAME}**", reply_markup=MAIN_BTN)
+    else:
+        await message.reply_text(f"**Hey, I am {BOT_NAME}**", reply_markup=MAIN_BTN)
 
 # ------------------- CALLBACKS -------------------
 @bot.on_callback_query()
 async def cb_handler(_, query: CallbackQuery):
+    await query.answer()
     if query.data == "HELP":
         await query.message.edit_text("Usage of chatbot commands...", reply_markup=HELP_BTN)
     elif query.data == "HELP_BACK":
@@ -73,7 +90,8 @@ async def cb_handler(_, query: CallbackQuery):
 # ------------------- CHATBOT ON/OFF -------------------
 @bot.on_message(filters.command(["chatbot on", f"chatbot@{BOT_USERNAME} on"]) & ~filters.private)
 async def chatbot_on(_, message: Message):
-    if message.from_user.id not in await is_admins(message.chat.id):
+    admins = await is_admins(message.chat.id)
+    if message.from_user.id not in admins:
         return await message.reply_text("You are not admin!")
     if vickdb.find_one({"chat_id": message.chat.id}):
         vickdb.delete_one({"chat_id": message.chat.id})
@@ -83,7 +101,8 @@ async def chatbot_on(_, message: Message):
 
 @bot.on_message(filters.command(["chatbot off", f"chatbot@{BOT_USERNAME} off"]) & ~filters.private)
 async def chatbot_off(_, message: Message):
-    if message.from_user.id not in await is_admins(message.chat.id):
+    admins = await is_admins(message.chat.id)
+    if message.from_user.id not in admins:
         return await message.reply_text("You are not admin!")
     if not vickdb.find_one({"chat_id": message.chat.id}):
         vickdb.insert_one({"chat_id": message.chat.id})
@@ -99,26 +118,38 @@ async def chatbot_ai(_, message: Message):
 
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
-    if message.reply_to_message and message.reply_to_message.from_user.id == (await bot.get_me()).id:
-        # Bot reply logic
-        responses = list(chatai.find({"word": message.text}))
+    bot_id = (await bot.get_me()).id
+
+    # Reply if message is a reply to bot
+    if message.reply_to_message and message.reply_to_message.from_user.id == bot_id:
+        responses = list(chatai.find({"word": {"$regex": f'^{message.text}$', "$options": "i"}}))
         if responses:
             reply = random.choice(responses)
-            if reply["check"] == "sticker":
-                await message.reply_sticker(reply["text"])
-            else:
-                await message.reply_text(reply["text"])
-    
-    # Learning new replies
-    if message.reply_to_message and message.from_user.id != (await bot.get_me()).id:
+            try:
+                if reply.get("check") == "sticker":
+                    await message.reply_sticker(reply["text"])
+                else:
+                    await message.reply_text(reply["text"])
+            except:
+                pass
+
+    # Learn new replies if user replied to bot
+    if message.reply_to_message and message.from_user.id != bot_id:
+        # Learn text
         if message.text:
-            exists = chatai.find_one({"word": message.reply_to_message.text, "text": message.text})
+            word = message.reply_to_message.text.lower()
+            reply_text = message.text
+            exists = chatai.find_one({"word": word, "text": reply_text})
             if not exists:
-                chatai.insert_one({"word": message.reply_to_message.text, "text": message.text, "check": "none"})
+                chatai.insert_one({"word": word, "text": reply_text, "check": "none"})
+        # Learn sticker
         if message.sticker:
-            exists = chatai.find_one({"word": message.reply_to_message.text, "id": message.sticker.file_unique_id})
+            word = message.reply_to_message.text.lower()
+            sticker_id = message.sticker.file_id
+            sticker_uid = message.sticker.file_unique_id
+            exists = chatai.find_one({"word": word, "id": sticker_uid})
             if not exists:
-                chatai.insert_one({"word": message.reply_to_message.text, "text": message.sticker.file_id, "check": "sticker", "id": message.sticker.file_unique_id})
+                chatai.insert_one({"word": word, "text": sticker_id, "check": "sticker", "id": sticker_uid})
 
 # ------------------- RUN -------------------
 bot.run()
